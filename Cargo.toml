@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+description = "A async concurrent buffer implementation fro no_std devices"
+
 homepage = "https://github.com/siemtim-dev/embytes-buffer-async"
 repository = "https://github.com/siemtim-dev/embytes-buffer-async.git"
 
