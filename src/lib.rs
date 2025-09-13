@@ -62,3 +62,11 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>>  AsyncBuffer<C, T> {
         BufferWriter::new(self)
     }
 }
+
+impl <const C: usize, const N: usize>  AsyncBuffer<C, [u8; N]> {
+
+    pub fn new_stack() -> Self {
+        Self::new([0; N])
+    }
+    
+}

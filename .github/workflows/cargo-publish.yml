@@ -1,0 +1,49 @@
+name: Cargo Publish
+run-name: Publish new version for commit  ${{ github.sha }} to crates.io
+
+on:
+  release:
+    types: [ published ]
+
+jobs:
+  cargo-publish:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    ## Does not work: triggered workflow is not found
+    # - name: Wait for Tets
+    #   uses: kamilchodola/wait-for-workflow-action@1.1.1
+    #   with: 
+    #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #     workflow_id: 'test-action.yml'
+    #     max_wait_minutes: 1
+    #     timeout: 120
+    #     repo_name: embytes-buffer
+    #     org_name: siemtim-dev
+    #     ref: ${{ github.ref }}
+    - name: "wait for test action to complete "
+      env:
+        COMMIT_SHA: ${{ github.sha }}
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        echo "waiting for test action: branch = $BRANCH, commit = $COMMIT_SHA, workflow = test-action.yml"
+        for i in $(seq 1 10);
+        do
+          result=$( gh run list --workflow test-action.yml --branch ${BRANCH} --commit ${COMMIT_SHA} --json status )
+          if echo $result | grep "completed"
+          then
+            echo "test action successful"
+            exit 0
+          fi
+          sleep 10
+        done
+        exit 1
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+    # See https://github.com/marketplace/actions/publish-crates
+    # Publish crate
+    - uses: katyo/publish-crates@v2
+      with:
+        registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
