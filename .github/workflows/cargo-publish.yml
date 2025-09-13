@@ -25,6 +25,7 @@ jobs:
       env:
         COMMIT_SHA: ${{ github.sha }}
         BRANCH: ${{ github.ref_name }}
+        GH_TOKEN: ${{ github.token }}
       run: |
         echo "waiting for test action: branch = $BRANCH, commit = $COMMIT_SHA, workflow = test-action.yml"
         for i in $(seq 1 10);
