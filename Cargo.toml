@@ -1,0 +1,22 @@
+[package]
+name = "embytes-buffer-async"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+defmt = { version = "1.0.1", optional = true }
+embassy-sync = { version = "0.6.2", optional = true }
+embedded-io = { version = "0.6.1", optional = true }
+embedded-io-async = { version = "0.6.1", optional = true }
+heapless = "0.8.0"
+thiserror = { version = "2.0.12", default-features = false }
+
+[features]
+default = [ "embedded", "std" ]
+std = [ "thiserror/std", "embassy-sync/std" ]
+embedded = ["dep:embassy-sync", "dep:embedded-io", "dep:embedded-io-async"]
+defmt = ["dep:defmt", "embedded-io/defmt-03", "embedded-io-async/defmt-03"]
+
+[dev-dependencies]
+ntest = "0.9.3"
+tokio = { version = "1.47.1", features = [ "rt", "macros", "time" ]}
