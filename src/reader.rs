@@ -156,6 +156,10 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
             }
         })
     }
+
+    pub fn reset(&self) {
+        self.buffer.inner.lock_mut(|inner| inner.reset());
+    }
     
 }
 

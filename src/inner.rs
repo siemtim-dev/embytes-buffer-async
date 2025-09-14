@@ -36,6 +36,13 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.read_position = 0;
+        self.write_position = 0;
+        self.wake_readers();
+        self.wake_writers();
+    }
+
     /// Shifs all elemts to the left to reuse dead capacity.
     /// returns the new capacity
     pub(crate) fn shift(&mut self) {

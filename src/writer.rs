@@ -145,6 +145,10 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
             expected_capacity: expected_capacity
         }
     }
+
+    pub fn reset(&self) {
+        self.buffer.inner.lock_mut(|inner| inner.reset());
+    }
 }
 
 pub struct WriteSliceAsyncFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {
