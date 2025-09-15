@@ -1,6 +1,6 @@
 use std::{str::from_utf8, sync::Arc, time::Duration};
 
-use embytes_buffer_async::{AsyncBuffer, ReadSliceAsyncResult, WriteSliceAsyncResult};
+use embytes_buffer_async::{AsyncBuffer, BufferRead, BufferWrite, ReadSliceAsyncResult, WriteSliceAsyncResult};
 
 use ntest::timeout;
 

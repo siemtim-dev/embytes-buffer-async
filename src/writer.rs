@@ -3,6 +3,21 @@ use core::{pin::Pin, task::{Context, Poll}};
 
 use crate::{mutex::Mutex, AsyncBuffer, BufferError};
 
+pub trait BufferWrite {
+
+    fn push(&self, data: &[u8]) -> Result<(), BufferError>;
+
+    fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> impl Future<Output = Result<(), BufferError>>;
+
+    fn write_slice<F>(&self, f: F) -> Result<usize, BufferError> where F: FnOnce(&mut [u8]) -> usize;
+    fn write_slice_async<F>(&self, f: F) -> impl Future<Output = Result<usize, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult;
+
+    fn await_capacity<'b>(&'b self, expected_capacity: usize) -> impl Future<Output = Result<(), BufferError>>;
+
+    fn reset(&self);
+
+}
+
 pub enum WriteSliceAsyncResult {
     Wait,
     Ready(usize),
@@ -81,27 +96,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
         })
     }
 
-    pub fn push(&self, data: &[u8]) -> Result<(), BufferError> {
-        self.buffer.inner.lock_mut(|inner| {
-            if inner.has_capacity(data.len()) {
-                let tgt = inner.writeable_data();
-                let tgt = &mut tgt[..data.len()];
-                tgt.copy_from_slice(data);
-                inner.write_commit(data.len())
-                    .expect("must not throw because capacity is checked before");
-                Ok(())
-            } else {
-                Err(BufferError::NoCapacity)
-            }
-        })
-    }
-
-    pub fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> PushFuture<'a, 'b, 'c, C, T> {
-        PushFuture {
-            writer: self,
-            data: data
-        }
-    } 
+    
 
     fn poll_push(&self, data: &[u8], cx: &mut Context<'_>) -> Poll<Result<(), BufferError>> {
         self.buffer.inner.lock_mut(|inner| {
@@ -122,27 +117,6 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
                 Poll::Ready(Ok(()))
             }
         })
-    }
-
-    pub fn write_slice<F>(&self, f: F) -> Result<usize, BufferError> where F: FnOnce(&mut [u8]) -> usize {
-        self.buffer.inner.lock_mut(|inner| {
-            inner.shift();
-            let writeable = inner.writeable_data();
-            let bytes_written = f(writeable);
-            if bytes_written > writeable.len() {
-                Err(BufferError::NoCapacity)
-            } else {
-                inner.write_commit(bytes_written).unwrap();
-                Ok(bytes_written)
-            }
-        })
-    }
-
-    pub fn write_slice_async<F>(&self, f: F) -> impl Future<Output = Result<usize, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult{
-        WriteSliceAsyncFuture{
-            writer: self,
-            f: f
-        }
     }
 
     fn poll_write_slice<F>(&self, f: &mut F, cx: &mut Context<'_>) -> Poll<Result<usize, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {
@@ -166,17 +140,64 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
             }
         })
     }
+}
 
-    pub fn await_capacity<'b>(&'b self, expected_capacity: usize) -> CapacityFuture<'a, 'b, C, T> {
+impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWrite for BufferWriter<'a, C, T> {
+
+    fn push(&self, data: &[u8]) -> Result<(), BufferError> {
+        self.buffer.inner.lock_mut(|inner| {
+            if inner.has_capacity(data.len()) {
+                let tgt = inner.writeable_data();
+                let tgt = &mut tgt[..data.len()];
+                tgt.copy_from_slice(data);
+                inner.write_commit(data.len())
+                    .expect("must not throw because capacity is checked before");
+                Ok(())
+            } else {
+                Err(BufferError::NoCapacity)
+            }
+        })
+    }
+
+    fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> impl Future<Output = Result<(), BufferError>> {
+        PushFuture {
+            writer: self,
+            data: data
+        }
+    } 
+
+    fn write_slice<F>(&self, f: F) -> Result<usize, BufferError> where F: FnOnce(&mut [u8]) -> usize {
+        self.buffer.inner.lock_mut(|inner| {
+            inner.shift();
+            let writeable = inner.writeable_data();
+            let bytes_written = f(writeable);
+            if bytes_written > writeable.len() {
+                Err(BufferError::NoCapacity)
+            } else {
+                inner.write_commit(bytes_written).unwrap();
+                Ok(bytes_written)
+            }
+        })
+    }
+    
+    fn write_slice_async<F>(&self, f: F) -> impl Future<Output = Result<usize, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {
+        WriteSliceAsyncFuture{
+            writer: self,
+            f: f
+        }
+    }
+
+    fn await_capacity<'b>(&'b self, expected_capacity: usize) -> impl Future<Output = Result<(), BufferError>> {
         CapacityFuture {
             writer: self,
             expected_capacity: expected_capacity
         }
     }
 
-    pub fn reset(&self) {
+    fn reset(&self) {
         self.buffer.inner.lock_mut(|inner| inner.reset());
     }
+
 }
 
 pub struct WriteSliceAsyncFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {

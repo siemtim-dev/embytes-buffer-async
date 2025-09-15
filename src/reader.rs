@@ -2,6 +2,22 @@ use core::{pin::Pin, task::{Context, Poll}};
 
 use crate::{mutex::Mutex, AsyncBuffer, BufferError};
 
+pub trait BufferRead {
+    
+    /// Ready from the currently available data in the [`BufferReader`].
+    /// The readable part of the buffer is passed to `f`. 
+    /// `f` returns the number of bytes read and a result that is passed back to the caller.
+    fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U);
+
+    fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U>;
+
+    fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>>;
+
+    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>>;
+
+    fn reset(&self);
+}
+
 /// A type to read from an [`AsyncBuffer`]
 pub struct BufferReader<'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
     buffer: &'a AsyncBuffer<C, T>
@@ -18,27 +34,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
         Self {
             buffer: buffer
         }
-    }
-
-    /// Ready from the currently available data in the [`BufferReader`].
-    /// The readable part of the buffer is passed to `f`. 
-    /// `f` returns the number of bytes read and a result that is passed back to the caller.
-    pub fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U){
-        self.buffer.inner.lock_mut(|inner|{
-            let readable = inner.readable_data();
-            let (bytes_read, result) = f(readable);
-            inner.read_commit(bytes_read)
-                .map(|_| result )
-        })
-    }
-
-    pub fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> 
-    where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
-        ReadSliceAsyncFuture{
-            reader: self,
-            f
-        }
-    }
+    }  
 
     /// A poll method to implement a `ReadSliceAsync`-[`Future`]
     /// The readable part of the buffer is passed to `f`. 
@@ -121,13 +117,6 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
         })
     }
 
-    pub fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> {
-        PullDataFuture{
-            reader: self,
-            buf: buf
-        }
-    }
-
     /// Base poll function to implement a pull future
     /// a pull future wait until `buf.len()` bytes are available
     fn poll_pull(&self, buf: &mut[u8], cx: &mut Context<'_>) -> Poll<Result<(), BufferError>> {
@@ -149,9 +138,39 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
             }
         })
     }
+}
 
+impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferRead for BufferReader<'a, C, T> {
+
+    fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U){
+        self.buffer.inner.lock_mut(|inner|{
+            let readable = inner.readable_data();
+            let (bytes_read, result) = f(readable);
+            inner.read_commit(bytes_read)
+                .map(|_| result )
+        })
+    }
     
-    pub fn wait_for_new_data<'b>(&'b self) -> NewDataFuture<'a, 'b, C, T> {
+    fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> 
+    where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
+        ReadSliceAsyncFuture{
+            reader: self,
+            f
+        }
+    }
+    
+    fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> {
+        PullDataFuture{
+            reader: self,
+            buf: buf
+        }
+    }
+    
+    fn reset(&self) {
+        self.buffer.inner.lock_mut(|inner| inner.reset());
+    }
+
+    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> {
         self.buffer.inner.lock(|inner|{
             NewDataFuture{
                 reader: self,
@@ -159,11 +178,6 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
             }
         })
     }
-
-    pub fn reset(&self) {
-        self.buffer.inner.lock_mut(|inner| inner.reset());
-    }
-    
 }
 
 pub struct ReadSliceAsyncFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
