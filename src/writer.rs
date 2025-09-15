@@ -124,7 +124,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
         })
     }
 
-    pub fn write_slice<F>(&self, f: F) -> Result<(), BufferError> where F: FnOnce(&mut [u8]) -> usize {
+    pub fn write_slice<F>(&self, f: F) -> Result<usize, BufferError> where F: FnOnce(&mut [u8]) -> usize {
         self.buffer.inner.lock_mut(|inner| {
             inner.shift();
             let writeable = inner.writeable_data();
@@ -133,19 +133,19 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
                 Err(BufferError::NoCapacity)
             } else {
                 inner.write_commit(bytes_written).unwrap();
-                Ok(())
+                Ok(bytes_written)
             }
         })
     }
 
-    pub fn write_slice_async<F>(&self, f: F) -> impl Future<Output = Result<(), BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult{
+    pub fn write_slice_async<F>(&self, f: F) -> impl Future<Output = Result<usize, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult{
         WriteSliceAsyncFuture{
             writer: self,
             f: f
         }
     }
 
-    fn poll_write_slice<F>(&self, f: &mut F, cx: &mut Context<'_>) -> Poll<Result<(), BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {
+    fn poll_write_slice<F>(&self, f: &mut F, cx: &mut Context<'_>) -> Poll<Result<usize, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {
         self.buffer.inner.lock_mut(|inner| {
             inner.shift();
             let writeable = inner.writeable_data();
@@ -161,7 +161,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
                 },
                 WriteSliceAsyncResult::Ready(bytes_written) => {
                     inner.write_commit(bytes_written).unwrap();
-                    Poll::Ready(Ok(()))
+                    Poll::Ready(Ok(bytes_written))
                 }
             }
         })
@@ -187,7 +187,7 @@ pub struct WriteSliceAsyncFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<
 impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F> Unpin for WriteSliceAsyncFuture<'a, 'b, C, T, F> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {}
 
 impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F> Future for WriteSliceAsyncFuture<'a, 'b, C, T, F> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult {
-    type Output = Result<(), BufferError>;
+    type Output = Result<usize, BufferError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.writer.poll_write_slice(&mut self.f, cx)
