@@ -288,3 +288,30 @@ async fn test_push_pull() {
 
 }
 
+#[tokio::test]
+#[timeout(10000)]
+async fn test_reset() {
+    let buffer_1 = Arc::new(AsyncBuffer::<1, _>::new([0; 16]));
+    let buffer_2 = buffer_1.clone();
+
+    buffer_1.create_writer().push(&[ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,13, 14, 15, 16 ]).unwrap();
+
+
+    let write_join = tokio::spawn(async move {
+        let writer = buffer_1.create_writer();
+
+        writer.push_async(&[ 100, 101 ]).await.unwrap();
+    });
+
+    let read_join = tokio::spawn(async move {
+        let reader = buffer_2.create_reader();
+
+        reader.reset();
+
+        let mut buf = [0; 2];
+        reader.pull(&mut buf).await.unwrap();
+        assert_eq!(&buf, &[ 100, 101 ]);
+    });
+
+    tokio::try_join!(read_join, write_join).unwrap();
+}
