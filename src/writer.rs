@@ -96,6 +96,34 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
         })
     }
 
+    pub fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> PushFuture<'a, 'b, 'c, C, T> {
+        PushFuture {
+            writer: self,
+            data: data
+        }
+    } 
+
+    fn poll_push(&self, data: &[u8], cx: &mut Context<'_>) -> Poll<Result<(), BufferError>> {
+        self.buffer.inner.lock_mut(|inner| {
+            if data.len() > inner.capacity() {
+                return Poll::Ready(Err(BufferError::NoCapacity));
+            }
+            
+            inner.shift();
+
+            let writeable = inner.writeable_data();
+            if writeable.len() < data.len() {
+                // println!("poll_push: waiting: {} bytes writeable but {} bytes of data", writeable.len(), data.len());
+                inner.add_write_waker(cx);
+                Poll::Pending
+            } else {
+                writeable[..data.len()].copy_from_slice(data);
+                inner.write_commit(data.len()).unwrap();
+                Poll::Ready(Ok(()))
+            }
+        })
+    }
+
     pub fn write_slice<F>(&self, f: F) -> Result<(), BufferError> where F: FnOnce(&mut [u8]) -> usize {
         self.buffer.inner.lock_mut(|inner| {
             inner.shift();
@@ -241,5 +269,20 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for CapacityF
             inner.poll_ensure_capacity(cx, self.expected_capacity)
                 .map_ok(|_| ())
         })
+    }
+}
+
+pub struct PushFuture <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+    writer: &'b BufferWriter<'a, C, T>,
+    data: &'c [u8]
+}
+
+impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for PushFuture<'a, 'b, 'c, C, T> {}
+
+impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for PushFuture<'a, 'b, 'c, C, T> {
+    type Output = Result<(), BufferError>;
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.writer.poll_push(self.data, cx)
     }
 }

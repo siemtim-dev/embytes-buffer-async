@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{str::from_utf8, sync::Arc, time::Duration};
 
 use embytes_buffer_async::{AsyncBuffer, ReadSliceAsyncResult, WriteSliceAsyncResult};
 
@@ -248,3 +248,43 @@ async fn test_slice_read_slice_write() {
     tokio::try_join!(read_join, write_join).unwrap();
 
 }
+
+
+
+#[tokio::test]
+#[timeout(10000)]
+async fn test_push_pull() {
+
+    const DATA: &[&[u8]] = &[
+        "agsdoadsg".as_bytes(),
+        "123012345".as_bytes(),
+        "sdhfkfhds".as_bytes()
+    ];
+
+    let buffer_1 = Arc::new(AsyncBuffer::<1, _>::new([0; 16]));
+    let buffer_2 = buffer_1.clone();
+
+    let write_join = tokio::spawn(async move {
+        let writer = buffer_1.create_writer();
+
+        for word in DATA {
+            writer.push_async(word).await.unwrap();
+            println!("write: pushed '{}' (len = {})", from_utf8(word).unwrap(), word.len());
+        }
+    });
+
+    let read_join = tokio::spawn(async move {
+        let reader = buffer_2.create_reader();
+
+        for word in DATA {
+            let mut b = [0; 9];
+            reader.pull(&mut b).await.unwrap();
+            assert_eq!(&b[..], *word);
+            println!("read: pulled '{}' (len = {})", from_utf8(&b).unwrap(), b.len());
+        }
+    });
+
+    tokio::try_join!(read_join, write_join).unwrap();
+
+}
+

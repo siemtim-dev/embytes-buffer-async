@@ -133,14 +133,17 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
     fn poll_pull(&self, buf: &mut[u8], cx: &mut Context<'_>) -> Poll<Result<(), BufferError>> {
         self.buffer.inner.lock_mut(|inner|{
             if inner.capacity() < buf.len() {
-                Poll::Ready(Err(BufferError::NoCapacity))
-            } else if inner.len() >= buf.len() {
-                let readable = inner.readable_data();
+                return Poll::Ready(Err(BufferError::NoCapacity));
+            }
+            
+            let readable = inner.readable_data();
+            if readable.len() >= buf.len() {
                 let readable = &readable[..buf.len()];
                 buf.copy_from_slice(readable);
                 inner.read_commit(buf.len()).unwrap();
                 Poll::Ready(Ok(()))
             } else {
+                // println!("poll_pull: waiting: {} bytes readable but {} bytes required", readable.len(), buf.len());
                 inner.add_read_waker(cx);
                 Poll::Pending
             }
