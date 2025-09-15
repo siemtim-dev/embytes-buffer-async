@@ -215,7 +215,7 @@ async fn test_slice_read_slice_write() {
                     println!("write: writing word {} (len = {})", word, bytes.len());
                     writeable[..bytes.len()].copy_from_slice(bytes);
                     writeable[bytes.len()] = ';' as u8;
-                    WriteSliceAsyncResult::Ready(bytes.len() + 1)
+                    WriteSliceAsyncResult::Ready(bytes.len() + 1, ())
                 } else {
                     println!("write: wait; capacity = {}", writeable.len());
                     WriteSliceAsyncResult::Wait
