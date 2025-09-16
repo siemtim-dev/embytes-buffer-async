@@ -9,6 +9,8 @@ pub trait BufferRead {
     /// `f` returns the number of bytes read and a result that is passed back to the caller.
     fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U);
 
+    fn try_read_slice<F, U>(&self, f: F) -> impl Future<Output = Result<Option<U>, BufferError>>  where F: FnOnce(&[u8]) -> Option<(usize, U)>;
+
     fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U>;
 
     fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>>;
@@ -140,6 +142,12 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
     }
 }
 
+enum TryReadSliceResult <U, E> {
+    Result(U),
+    Error(E),
+    WaitForNewData(usize)
+}
+
 impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferRead for BufferReader<'a, C, T> {
 
     fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U){
@@ -156,6 +164,35 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferRead for BufferRea
         ReadSliceAsyncFuture{
             reader: self,
             f
+        }
+    }
+
+    fn try_read_slice<F, U>(&self, f: F) -> impl Future<Output = Result<Option<U>, BufferError>>
+    where F: FnOnce(&[u8]) -> Option<(usize, U)> {
+        async {
+            let result = self.buffer.inner.lock_mut(|inner|{
+                let readable = inner.readable_data();
+                let result = f(readable);
+                if let Some((bytes_read, result)) = result {
+                    match inner.read_commit(bytes_read) {
+                        Ok(_) => TryReadSliceResult::Result(result),
+                        Err(err) => TryReadSliceResult::Error(err)
+                    }
+                } else {
+                    TryReadSliceResult::WaitForNewData(readable.len())
+                }
+            });
+
+            match result {
+                TryReadSliceResult::Result(result) => Ok(Some(result)),
+                TryReadSliceResult::Error(err) => Err(err),
+                TryReadSliceResult::WaitForNewData(old_size) => {
+                    NewDataFuture{
+                        reader: self,
+                        old_len: old_size
+                    }.await.map(|_| None)
+                },
+            }
         }
     }
     
