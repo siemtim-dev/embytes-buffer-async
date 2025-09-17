@@ -18,6 +18,8 @@ pub trait BufferRead {
     fn try_reset(&self) -> Result<(), BufferError>;
 
     fn lock(&self) -> impl Future<Output = impl RLock>;
+
+    fn len(&self) -> usize;
 }
 
 /// A type to read from an [`AsyncBuffer`]
@@ -169,6 +171,10 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> BufferRead for Bu
         ReadLockFuture {
             reader: self
         }
+    }
+    
+    fn len(&self) -> usize {
+        self.buffer.inner.lock(|inner| inner.len())
     }
 }
 

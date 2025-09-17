@@ -18,6 +18,10 @@ pub trait BufferWrite {
 
     fn lock(&self) -> impl Future<Output = impl WLock>;
 
+
+    fn remaining_capacity(&self) -> usize;
+    fn capacity(&self) -> usize;
+
 }
 
 pub enum WriteSliceAsyncResult<U> {
@@ -194,6 +198,14 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWrite for BufferWr
         WriteLockFuture{
             reader: self
         }
+    }
+    
+    fn remaining_capacity(&self) -> usize {
+        self.buffer.inner.lock(|inner| inner.remaining_capacity())
+    }
+    
+    fn capacity(&self) -> usize {
+        self.buffer.inner.lock(|inner| inner.capacity())
     }
 
 }
