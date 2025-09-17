@@ -1,4 +1,4 @@
-use core::{pin::Pin, task::{Context, Poll}};
+use core::{cell::Cell, ops::Deref, pin::Pin, slice::from_raw_parts, task::{Context, Poll}};
 
 use crate::{mutex::Mutex, AsyncBuffer, BufferError};
 
@@ -9,15 +9,15 @@ pub trait BufferRead {
     /// `f` returns the number of bytes read and a result that is passed back to the caller.
     fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U);
 
-    fn try_read_slice<F, U>(&self, f: F) -> impl Future<Output = Result<Option<U>, BufferError>>  where F: FnOnce(&[u8]) -> Option<(usize, U)>;
-
     fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U>;
 
     fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>>;
 
-    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>>;
+    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> + Send;
 
-    fn reset(&self);
+    fn try_reset(&self) -> Result<(), BufferError>;
+
+    fn lock(&self) -> impl Future<Output = impl RLock>;
 }
 
 /// A type to read from an [`AsyncBuffer`]
@@ -46,47 +46,21 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
     where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
         self.buffer.inner.lock_mut(|inner| {
             let readable = inner.readable_data();
-            match f(readable) {
-                ReadSliceAsyncResult::Wait => {
-                    inner.add_read_waker(cx);
-                    Poll::Pending
-                },
-                ReadSliceAsyncResult::Ready(bytes_read, result) => Poll::Ready(
-                    inner.read_commit(bytes_read).map(|_| result)
-                ),
-            }
-        })
-    }
-
-    /// Base function for implementing readers like [`embedded_io::Read`]
-    /// Returns the number of bytes read from the buffer to the provided slice
-    /// 
-    /// # Errors
-    /// 
-    /// [`BufferError::ProvidedSliceEmpty`] if the provided slice is empty
-    /// [`BufferError::NoData`] if there ae no bytes to read
-    fn read_base(&self, buf: &mut[u8]) -> Result<usize, BufferError> {
-        if buf.is_empty() {
-            return Err(BufferError::ProvidedSliceEmpty);
-        }
-
-        self.buffer.inner.lock_mut(|inner|{
-            let src = inner.readable_data();
-
-            if src.is_empty() {
-                return Err(BufferError::NoData);
-            }
-            else if src.len() > buf.len() {
-                buf.copy_from_slice(&src[0..buf.len()]);
-                inner.read_commit(buf.len()).unwrap();
-                Ok(buf.len())
+            if let Some(readable) = readable {
+                match f(readable) {
+                    ReadSliceAsyncResult::Wait => {
+                        inner.add_read_waker(cx);
+                        Poll::Pending
+                    },
+                    ReadSliceAsyncResult::Ready(bytes_read, result) => Poll::Ready(
+                        inner.read_commit(bytes_read).map(|_| result)
+                    ),
+                }
             } else {
-                let buf = &mut buf[0..src.len()];
-                buf.copy_from_slice(src);
-                let bytes_read = src.len();
-                inner.read_commit(bytes_read).unwrap();
-                Ok(bytes_read)
+                inner.add_read_waker(cx);
+                Poll::Pending
             }
+            
         })
     }
 
@@ -99,22 +73,27 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
         self.buffer.inner.lock_mut(|inner|{
             let src = inner.readable_data();
 
-            if src.is_empty() {
+            if let Some(src) = src {
+                if src.is_empty() {
+                    inner.add_read_waker(cx);
+                    Poll::Pending
+                }
+                else if src.len() > buf.len() {
+                    buf.copy_from_slice(&src[0..buf.len()]);
+                    inner.read_commit(buf.len()).unwrap();
+
+                    Poll::Ready(Ok(buf.len()))
+                } else {
+                    let buf = &mut buf[0..src.len()];
+                    buf.copy_from_slice(src);
+                    let bytes_read = src.len();
+                    inner.read_commit(bytes_read).unwrap();
+
+                    Poll::Ready(Ok(bytes_read))
+                }
+            } else {
                 inner.add_read_waker(cx);
                 Poll::Pending
-            }
-            else if src.len() > buf.len() {
-                buf.copy_from_slice(&src[0..buf.len()]);
-                inner.read_commit(buf.len()).unwrap();
-
-                Poll::Ready(Ok(buf.len()))
-            } else {
-                let buf = &mut buf[0..src.len()];
-                buf.copy_from_slice(src);
-                let bytes_read = src.len();
-                inner.read_commit(bytes_read).unwrap();
-
-                Poll::Ready(Ok(bytes_read))
             }
         })
     }
@@ -128,34 +107,33 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
             }
             
             let readable = inner.readable_data();
-            if readable.len() >= buf.len() {
-                let readable = &readable[..buf.len()];
-                buf.copy_from_slice(readable);
-                inner.read_commit(buf.len()).unwrap();
-                Poll::Ready(Ok(()))
-            } else {
-                // println!("poll_pull: waiting: {} bytes readable but {} bytes required", readable.len(), buf.len());
-                inner.add_read_waker(cx);
-                Poll::Pending
+            match readable {
+                Some(readable) if readable.len() >= buf.len() => {
+                    let readable = &readable[..buf.len()];
+                    buf.copy_from_slice(readable);
+                    inner.read_commit(buf.len()).unwrap();
+                    Poll::Ready(Ok(()))
+                },
+                _ => {
+                    inner.add_read_waker(cx);
+                    Poll::Pending
+                }
             }
         })
     }
 }
 
-enum TryReadSliceResult <U, E> {
-    Result(U),
-    Error(E),
-    WaitForNewData(usize)
-}
-
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferRead for BufferReader<'a, C, T> {
+impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> BufferRead for BufferReader<'a, C, T> {
 
     fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U){
         self.buffer.inner.lock_mut(|inner|{
-            let readable = inner.readable_data();
-            let (bytes_read, result) = f(readable);
-            inner.read_commit(bytes_read)
-                .map(|_| result )
+            if let Some(readable) = inner.readable_data() {
+                let (bytes_read, result) = f(readable);
+                inner.read_commit(bytes_read)
+                    .map(|_| result )
+            } else {
+                Err(BufferError::Locked)
+            }
         })
     }
     
@@ -166,35 +144,6 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferRead for BufferRea
             f
         }
     }
-
-    fn try_read_slice<F, U>(&self, f: F) -> impl Future<Output = Result<Option<U>, BufferError>>
-    where F: FnOnce(&[u8]) -> Option<(usize, U)> {
-        async {
-            let result = self.buffer.inner.lock_mut(|inner|{
-                let readable = inner.readable_data();
-                let result = f(readable);
-                if let Some((bytes_read, result)) = result {
-                    match inner.read_commit(bytes_read) {
-                        Ok(_) => TryReadSliceResult::Result(result),
-                        Err(err) => TryReadSliceResult::Error(err)
-                    }
-                } else {
-                    TryReadSliceResult::WaitForNewData(readable.len())
-                }
-            });
-
-            match result {
-                TryReadSliceResult::Result(result) => Ok(Some(result)),
-                TryReadSliceResult::Error(err) => Err(err),
-                TryReadSliceResult::WaitForNewData(old_size) => {
-                    NewDataFuture{
-                        reader: self,
-                        old_len: old_size
-                    }.await.map(|_| None)
-                },
-            }
-        }
-    }
     
     fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> {
         PullDataFuture{
@@ -203,17 +152,23 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferRead for BufferRea
         }
     }
     
-    fn reset(&self) {
-        self.buffer.inner.lock_mut(|inner| inner.reset());
+    fn try_reset(&self) -> Result<(), BufferError> {
+        self.buffer.inner.lock_mut(|inner| inner.try_reset())
     }
 
-    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> {
+    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> + Send {
         self.buffer.inner.lock(|inner|{
             NewDataFuture{
                 reader: self,
                 old_len: inner.len()
             }
         })
+    }
+    
+    fn lock(&self) -> impl Future<Output = impl RLock> {
+        ReadLockFuture {
+            reader: self
+        }
     }
 }
 
@@ -243,7 +198,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for NewDataFu
     type Output = Result<(), BufferError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.reader.buffer.inner.lock_mut(|inner|{
+        self.reader.buffer.inner.lock_mut(|inner| {
             if self.old_len < inner.len() {
                 Poll::Ready(Ok(()))
             } else if inner.capacity() <= self.old_len {
@@ -310,19 +265,86 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> embedded_io_async::Read 
     }
 }
 
-#[cfg(feature = "std")]
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> std::io::Read for BufferReader<'a, C, T> {
-    
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        use std::io::ErrorKind;
+pub trait RLock: Deref<Target = [u8]> + Send {
+    fn set_bytes_read(&self, bytes_read: usize) -> Result<(), BufferError>;
+    fn wait_for_new_data(self) -> impl Future<Output = Result<(), BufferError>> + Send;
+}
 
-        match self.read_base(buf) {
-            Ok(n) => Ok(n),
-            Err(BufferError::ProvidedSliceEmpty) => Ok(0),
-            Err(BufferError::NoData) => Err(ErrorKind::WouldBlock.into()),
-            Err(e) => {
-                panic!("unexpected error reading from buffer: {}", e);
-            }
+pub struct ReadLock<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+    reader: &'b BufferReader<'a, C, T>,
+    data: *const u8,
+    len: usize,
+    bytes_read: Cell<usize>
+}
+
+impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadLock<'a, 'b, C, T> {
+    fn new(reader: &'b BufferReader<'a, C, T>, data: *const u8, len: usize,) -> Self {
+        Self {
+            data: data,
+            reader: reader,
+            len: len,
+            bytes_read: Cell::new(0)
         }
+    }
+}
+
+impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> RLock for ReadLock<'a, 'b, C, T> {
+    fn set_bytes_read(&self, bytes_read: usize) -> Result<(), BufferError> {
+        if bytes_read > self.len {
+            Err(BufferError::NoData)
+        } else {
+            self.bytes_read.set(bytes_read);
+            Ok(())
+        }
+    }
+
+    fn wait_for_new_data(self) -> impl Future<Output = Result<(), BufferError>> + Send {
+        let old_len = self.reader.buffer.inner.lock_mut(|inner| {
+            inner.read_commit(self.bytes_read.get()).unwrap();
+            self.bytes_read.set(0);
+            inner.len()
+        });
+
+        NewDataFuture{
+            reader: self.reader,
+            old_len: old_len
+        }
+    }
+}
+
+impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for ReadLock<'a, 'b, C, T> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            from_raw_parts(self.data, self.len)
+        }
+    }
+}
+
+impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for ReadLock<'a, 'b, C, T> {
+    fn drop(&mut self) {
+        self.reader.buffer.inner.lock_mut(|inner| {
+            inner.read_commit(self.bytes_read.get()).unwrap();
+            unsafe { inner.read_unlock() };
+        });
+    }
+}
+
+unsafe impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Send for ReadLock<'a, 'b, C, T> {}
+
+pub struct ReadLockFuture <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+    reader: &'b BufferReader<'a, C, T>
+}
+
+impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for ReadLockFuture<'a, 'b, C, T> {}
+
+impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for ReadLockFuture<'a, 'b, C, T> {
+    type Output = ReadLock<'a, 'b, C, T>;
+
+    fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.reader.buffer.inner.lock_mut(|inner| {
+            inner.poll_read_lock(cx).map(|(data, len)| ReadLock::new(self.reader, data, len))
+        })
     }
 }

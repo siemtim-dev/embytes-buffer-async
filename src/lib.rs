@@ -32,6 +32,9 @@ pub enum BufferError {
 
     #[error("Error reading from buffer: no remaining data")]
     NoData,
+
+    #[error("The requested operation has failed bacause a resource is locked")]
+    Locked,
 }
 
 /// An async Buffer implementation that can be concurrently read from and written to

@@ -21,6 +21,10 @@ pub(crate) struct BufferInner <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
 
     /// wakers registered from waiting writers that wait for new space to write to
     write_wakers: Vec<Waker, C>,
+
+    read_loked: bool,
+
+    write_locked: bool
     
 }
 
@@ -33,19 +37,51 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
             
             read_wakers: Vec::new(),
             write_wakers: Vec::new(),
+
+            read_loked: false,
+            write_locked: false
         }
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub(crate) fn try_reset(&mut self) -> Result<(), BufferError> {
+        if self.read_loked || self.write_locked {
+            Err(BufferError::Locked)
+        } else {
+            self.reset();
+            Ok(())
+        }
+    }
+
+    fn reset(&mut self) {
         self.read_position = 0;
         self.write_position = 0;
         self.wake_readers();
         self.wake_writers();
     }
 
+    // pub(crate) fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    //     if self.read_loked || self.write_locked {
+    //         self.add_write_waker(cx);
+    //         Poll::Pending
+    //     } else {
+    //         self.reset();
+    //         Poll::Ready(())
+    //     }
+    // }
+
+    pub(crate) fn poll_shift(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.read_loked || self.write_locked {
+            self.add_write_waker(cx);
+            Poll::Pending
+        } else {
+            unsafe { self.shift() };
+            Poll::Ready(())
+        }
+    }
+
     /// Shifs all elemts to the left to reuse dead capacity.
     /// returns the new capacity
-    pub(crate) fn shift(&mut self) {
+    unsafe fn shift(&mut self) {
         if self.read_position > 0 {
             self.source.as_mut().rotate_left(self.read_position);
             self.write_position -= self.read_position;
@@ -53,13 +89,13 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
         }
     }
 
-    /// Performs a shift operation
-    pub(crate) fn maybe_shift(&mut self) -> usize {
-        if ! self.has_remaining_capacity() {
-            self.shift();
+    pub(crate) fn try_shift(&mut self) -> Result<(), BufferError> {
+        if self.read_loked || self.write_locked {
+            Err(BufferError::Locked)
+        } else {
+            unsafe { self.shift() };
+            Ok(())
         }
-
-        self.remaining_capacity()
     }
 
     pub(crate) fn remaining_capacity(&self) -> usize {
@@ -76,6 +112,11 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
     /// 
     /// This function is only for write operations because it registers a write waker.
     pub(crate) fn poll_ensure_capacity(&mut self, cx: &mut Context<'_>, required_capaciyt: usize) -> Poll<Result<usize, BufferError>> {
+        if self.write_locked {
+            self.add_write_waker(cx);
+            return Poll::Pending;
+        }
+        
         if self.remaining_capacity() >= required_capaciyt {
             return Poll::Ready(Ok(self.remaining_capacity()))
         }
@@ -84,7 +125,9 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
             return Poll::Ready(Err(BufferError::NoCapacity));
         }
 
-        self.shift();
+        if let Poll::Pending = self.poll_shift(cx) {
+            return Poll::Pending;
+        }
 
         if self.remaining_capacity() >= required_capaciyt {
             Poll::Ready(Ok(self.remaining_capacity()))
@@ -100,9 +143,10 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
         self.remaining_capacity() >= required_capaciyt
     }
 
-    pub(crate) fn has_remaining_capacity(&self) -> bool {
-        self.remaining_capacity() > 0
-    }
+    /// Returns the has remaining capacity of this [`BufferInner<C, T>`].
+    // pub(crate) fn has_remaining_capacity(&self) -> bool {
+    //     self.remaining_capacity() > 0
+    // }
 
     /// returns the length of the readable data
     pub(crate) fn len(&self) -> usize {
@@ -132,12 +176,20 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
     }
 
     /// Returns the readable data as a slice
-    pub(crate) fn readable_data(&self) -> &[u8] {
-        &self.source.as_ref()[self.read_position..self.write_position]
+    pub(crate) fn readable_data(&self) -> Option<&[u8]> {
+        if self.read_loked {
+            None
+        } else {
+            Some(&self.source.as_ref()[self.read_position..self.write_position])
+        }
     }
 
-    pub(crate) fn writeable_data(&mut self) -> &mut [u8] {
-        &mut self.source.as_mut()[self.write_position..]
+    pub(crate) fn writeable_data(&mut self) -> Option<&mut [u8]> {
+        if self.write_locked {
+            None
+        } else {
+            Some(&mut self.source.as_mut()[self.write_position..])
+        }
     }
 
     pub(crate) fn write_commit(&mut self, bytes_written: usize) -> Result<(), BufferError> {
@@ -159,6 +211,64 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
             Ok(())
         }
     }
+
+    pub(crate) fn poll_read_lock(&mut self, cx: &mut Context<'_>) -> Poll<(*const u8, usize)> {
+        if self.read_loked {
+            self.add_read_waker(cx);
+            Poll::Pending
+        } else {
+            Poll::Ready(self.read_lock())
+        }
+    }
+
+    pub(crate) fn read_lock(&mut self) -> (*const u8, usize) {
+        let readable = self.readable_data()
+            .expect("can only lock for reading if not already locked");
+        let result = (readable.as_ptr(), readable.len());
+        self.read_loked = true;
+        result
+    }
+
+    pub(crate) fn poll_write_lock(&mut self, cx: &mut Context<'_>) -> Poll<(*mut u8, usize)> {
+        if self.write_locked {
+            self.add_write_waker(cx);
+            Poll::Pending
+        } else if let Poll::Pending = self.poll_shift(cx) {
+            Poll::Pending
+        } else {
+            Poll::Ready(self.write_lock())
+        }
+    }
+
+    pub(crate) fn write_lock(&mut self) -> (*mut u8, usize) {
+        let readable = self.writeable_data()
+            .expect("can only lock for writing if not already locked");
+        let result = (readable.as_mut_ptr(), readable.len());
+        self.write_locked = true;
+        result
+    }
+
+    // pub(crate) fn is_read_locked(&self) -> bool {
+    //     self.read_loked
+    // }
+
+    pub(crate) fn is_write_locked(&self) -> bool {
+        self.write_locked
+    }
+
+    pub(crate) unsafe fn read_unlock(&mut self) {
+        assert!(self.read_loked, "read_unlock makes no sense when not locked");
+        self.read_loked = false;
+        self.wake_readers();
+        self.wake_writers();
+    }
+
+    pub(crate) unsafe fn write_unlock(&mut self) {
+        assert!(self.write_locked, "read_unlock makes no sense when not locked");
+        self.write_locked = false;
+        // self.wake_readers();
+        self.wake_writers();
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -172,33 +282,14 @@ mod tests {
         inner.write_position = 5;
         inner.read_position = 0;
 
-        inner.shift();
+        unsafe { inner.shift() };
         assert_eq!(inner.write_position, 5);
         assert_eq!(inner.read_position, 0);
 
         inner.read_position = 2;
-        inner.shift();
+        unsafe { inner.shift() };
         assert_eq!(inner.write_position, 3);
         assert_eq!(inner.read_position, 0);
         assert_eq!(&source[..3], &[3, 4, 5]);
-    }
-
-    #[test]
-    fn test_inner_maybe_shift() {
-        let mut source = [1, 2, 3, 4, 5, 0, 0, 0];
-        let mut inner = BufferInner::<1, _>::new(&mut source);
-        inner.write_position = 5;
-        inner.read_position = 1;
-
-        let cap = inner.maybe_shift();
-        assert_eq!(inner.write_position, 5);
-        assert_eq!(inner.read_position, 1);
-        assert_eq!(cap, 3);
-
-        inner.write_position = 8;
-        let cap = inner.maybe_shift();
-        assert_eq!(inner.write_position, 7);
-        assert_eq!(inner.read_position, 0);
-        assert_eq!(cap, 1);
     }
 }
