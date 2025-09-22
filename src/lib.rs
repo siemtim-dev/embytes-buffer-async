@@ -20,7 +20,7 @@ mod inner;
 pub mod pipe;
 
 /// Error enum 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum BufferError {
 
