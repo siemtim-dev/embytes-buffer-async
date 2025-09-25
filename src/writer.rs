@@ -1,22 +1,34 @@
 
 use core::{ops::{Deref, DerefMut}, pin::Pin, slice::from_raw_parts_mut, task::{Context, Poll}};
 
-use crate::{mutex::Mutex, AsyncBuffer, BufferError};
+use crate::{mutex::Mutex, AsyncBuffer, BufferError, BufferSource};
 
-pub trait BufferWrite {
+#[cfg(feature = "embedded")]
+pub trait MaybeWrite: embedded_io_async::Write {}
+
+#[cfg(feature = "embedded")]
+impl <T> MaybeWrite for T where T: embedded_io_async::Write {}
+
+#[cfg(not(feature = "embedded"))]
+pub trait MaybeWrite {}
+
+#[cfg(not(feature = "embedded"))]
+impl <T> MaybeWrite for T {}
+
+pub trait BufferWrite: MaybeWrite + Send {
 
     fn push(&self, data: &[u8]) -> Result<(), BufferError>;
 
-    fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> impl Future<Output = Result<(), BufferError>>;
+    fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> impl Future<Output = Result<(), BufferError>> + Send;
 
     fn write_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&mut [u8]) -> (usize, U);
-    fn write_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U>;
+    fn write_slice_async<F, U: Send>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> + Send where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> + Send;
 
     fn await_capacity<'b>(&'b self, expected_capacity: usize) -> impl Future<Output = Result<(), BufferError>>;
 
     fn try_reset(&self) -> Result<(), BufferError>;
 
-    fn lock(&self) -> impl Future<Output = impl WLock>;
+    fn lock(&self) -> impl Future<Output = impl WLock> + Send;
 
 
     fn remaining_capacity(&self) -> usize;
@@ -29,11 +41,11 @@ pub enum WriteSliceAsyncResult<U> {
     Ready(usize, U),
 }
 
-pub struct BufferWriter <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct BufferWriter <'a, const C: usize, T: BufferSource> {
     buffer: &'a AsyncBuffer<C, T>
 }
  
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> BufferWriter<'a, C, T> {
 
     pub(crate) fn new(buffer: &'a AsyncBuffer<C, T>) -> Self {
         Self {
@@ -135,7 +147,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWriter<'a, C, T> {
     }
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWrite for BufferWriter<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> BufferWrite for BufferWriter<'a, C, T> {
 
     fn push(&self, data: &[u8]) -> Result<(), BufferError> {
         self.buffer.inner.lock_mut(|inner| {
@@ -154,7 +166,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWrite for BufferWr
         })
     }
 
-    fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> impl Future<Output = Result<(), BufferError>> {
+    fn push_async<'b, 'c>(&'b self, data: &'c [u8]) -> impl Future<Output = Result<(), BufferError>> + Send {
         PushFuture {
             writer: self,
             data: data
@@ -176,7 +188,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWrite for BufferWr
         })
     }
     
-    fn write_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> {
+    fn write_slice_async<F, U: Send>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> + Send where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> + Send{
         WriteSliceAsyncFuture{
             writer: self,
             f: f
@@ -210,16 +222,19 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferWrite for BufferWr
 
 }
 
-pub struct WriteSliceAsyncFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> {
+pub struct WriteSliceAsyncFuture<'a, 'b, const C: usize, T: BufferSource, F, U: Send> where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> + Send {
     writer: &'b BufferWriter<'a, C, T>,
     f: F
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> Unpin for WriteSliceAsyncFuture<'a, 'b, C, T, F, U> 
-where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> {}
+// unsafe impl <'a, 'b, const C: usize, T: BufferSource, F, U> Send for WriteSliceAsyncFuture<'a, 'b, C, T, F, U> 
+// where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> {}
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> Future for WriteSliceAsyncFuture<'a, 'b, C, T, F, U>
-where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> {
+impl <'a, 'b, const C: usize, T: BufferSource, F, U: Send> Unpin for WriteSliceAsyncFuture<'a, 'b, C, T, F, U> 
+where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> + Send {}
+
+impl <'a, 'b, const C: usize, T: BufferSource, F, U: Send> Future for WriteSliceAsyncFuture<'a, 'b, C, T, F, U>
+where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> + Send{
     type Output = Result<U, BufferError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -228,21 +243,21 @@ where F: FnMut(&mut [u8]) -> WriteSliceAsyncResult<U> {
 }
 
 #[cfg(feature = "embedded")]
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> embedded_io::ErrorType for BufferWriter<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> embedded_io::ErrorType for BufferWriter<'a, C, T> {
     type Error = embedded_io::ErrorKind;
 }
 
 #[cfg(feature = "embedded")]
-struct EmbeddedWriteFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+struct EmbeddedWriteFuture<'a, 'b, const C: usize, T: BufferSource> {
     writer: &'a BufferWriter<'a, C, T>,
     buf: &'b [u8]
 }
 
 #[cfg(feature = "embedded")]
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for EmbeddedWriteFuture<'a, 'b, C, T> {}
+impl <'a, 'b, const C: usize, T: BufferSource> Unpin for EmbeddedWriteFuture<'a, 'b, C, T> {}
 
 #[cfg(feature = "embedded")]
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for EmbeddedWriteFuture<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Future for EmbeddedWriteFuture<'a, 'b, C, T> {
     type Output = Result<usize, embedded_io::ErrorKind>;
     
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -256,7 +271,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for EmbeddedW
 }
 
 #[cfg(feature = "embedded")]
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> embedded_io_async::Write for BufferWriter<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> embedded_io_async::Write for BufferWriter<'a, C, T> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         let f = EmbeddedWriteFuture{
             writer: self,
@@ -267,14 +282,14 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> embedded_io_async::Write
     }
 }
 
-pub struct CapacityFuture <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct CapacityFuture <'a, 'b, const C: usize, T: BufferSource> {
     writer: &'b BufferWriter<'a, C, T>,
     expected_capacity: usize
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for CapacityFuture<'a, 'b, C, T> {}
+impl <'a, 'b, const C: usize, T: BufferSource> Unpin for CapacityFuture<'a, 'b, C, T> {}
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for CapacityFuture<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Future for CapacityFuture<'a, 'b, C, T> {
     type Output = Result<(), BufferError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -285,14 +300,16 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for CapacityF
     }
 }
 
-pub struct PushFuture <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct PushFuture <'a, 'b, 'c, const C: usize, T: BufferSource> {
     writer: &'b BufferWriter<'a, C, T>,
     data: &'c [u8]
 }
 
-impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for PushFuture<'a, 'b, 'c, C, T> {}
+impl <'a, 'b, 'c, const C: usize, T: BufferSource> Unpin for PushFuture<'a, 'b, 'c, C, T> {}
 
-impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for PushFuture<'a, 'b, 'c, C, T> {
+// unsafe impl <'a, 'b, 'c, const C: usize, T: BufferSource> Send for PushFuture<'a, 'b, 'c, C, T> {}
+
+impl <'a, 'b, 'c, const C: usize, T: BufferSource> Future for PushFuture<'a, 'b, 'c, C, T> {
     type Output = Result<(), BufferError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -304,13 +321,13 @@ pub trait WLock: Deref<Target = [u8]> + DerefMut + Send {
     fn commit(self, bytes_written: usize) -> Result<(), BufferError>;
 }
 
-pub struct WriteLock<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct WriteLock<'a, 'b, const C: usize, T: BufferSource> {
     writer: &'b BufferWriter<'a, C, T>,
     data: *mut u8,
     len: usize,
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> WriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> WriteLock<'a, 'b, C, T> {
     fn new(writer: &'b BufferWriter<'a, C, T>, data: *mut u8, len: usize,) -> Self {
         Self {
             data: data,
@@ -320,7 +337,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> WriteLock<'a, 'b, C,
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> WLock for WriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> WLock for WriteLock<'a, 'b, C, T> {
     fn commit(self, bytes_written: usize) -> Result<(), BufferError> {
         self.writer.buffer.inner.lock_mut(|inner| {
             inner.write_commit(bytes_written)
@@ -328,7 +345,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> WLock for WriteLock<
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for WriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Deref for WriteLock<'a, 'b, C, T> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -338,7 +355,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for WriteLock<
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> DerefMut for WriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> DerefMut for WriteLock<'a, 'b, C, T> {
 
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
@@ -347,7 +364,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> DerefMut for WriteLo
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for WriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Drop for WriteLock<'a, 'b, C, T> {
     fn drop(&mut self) {
         self.writer.buffer.inner.lock_mut(|inner| {
             unsafe { inner.write_unlock() };
@@ -355,15 +372,15 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for WriteLock<'
     }
 }
 
-unsafe impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Send for WriteLock<'a, 'b, C, T> {}
+unsafe impl <'a, 'b, const C: usize, T: BufferSource> Send for WriteLock<'a, 'b, C, T> {}
 
-pub struct WriteLockFuture <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct WriteLockFuture <'a, 'b, const C: usize, T: BufferSource> {
     reader: &'b BufferWriter<'a, C, T>
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for WriteLockFuture<'a, 'b, C, T> {}
+impl <'a, 'b, const C: usize, T: BufferSource> Unpin for WriteLockFuture<'a, 'b, C, T> {}
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for WriteLockFuture<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Future for WriteLockFuture<'a, 'b, C, T> {
     type Output = WriteLock<'a, 'b, C, T>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

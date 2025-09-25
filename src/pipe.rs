@@ -1,22 +1,20 @@
-use crate::{AsyncBuffer, BufferReader, BufferWriter};
+use crate::{BufferRead, BufferWrite};
 
-pub struct ReadPipe<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, S: embedded_io_async::Read> {
+pub struct ReadPipe<'a, W: BufferWrite, S: embedded_io_async::Read> {
     source: &'a mut S,
-    target: BufferWriter<'b, C, T>
+    target: W
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, S: embedded_io_async::Read> ReadPipe<'a, 'b, C, T, S> {
+impl <'a, W: BufferWrite, S: embedded_io_async::Read> ReadPipe<'a, W, S> {
 
-    pub fn new(source: &'a mut S, buffer: &'b AsyncBuffer<C, T>) -> Self {
+    pub fn new(source: &'a mut S, target: W) -> Self {
         Self {
             source: source,
-            target: buffer.create_writer()
+            target: target
         }
     }
 
     pub async fn run(&mut self) -> Result<(), S::Error> {
-        use embedded_io_async::Write;
-
         let mut buf = [0; 64];
         loop {
             let n = self.source.read(&mut buf).await?;
@@ -25,22 +23,21 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, S: embedded_io_async
     }
 }
 
-pub struct WritePipe<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, S: embedded_io_async::Write> {
+pub struct WritePipe<'a, R: BufferRead, S: embedded_io_async::Write> {
     target: &'a mut S,
-    source: BufferReader<'b, C, T>
+    source: R
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, S: embedded_io_async::Write> WritePipe<'a, 'b, C, T, S> {
+impl <'a, R: BufferRead, S: embedded_io_async::Write> WritePipe<'a, R, S> {
 
-    pub fn new(target: &'a mut S, buffer: &'b AsyncBuffer<C, T>) -> Self {
+    pub fn new(target: &'a mut S, source: R) -> Self {
         Self {
             target: target,
-            source: buffer.create_reader()
+            source: source
         }
     }
 
     pub async fn run(&mut self) -> Result<(), S::Error> {
-        use embedded_io_async::Read;
 
         let mut buf = [0; 64];
         loop {

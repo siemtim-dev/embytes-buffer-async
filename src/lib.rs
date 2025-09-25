@@ -42,12 +42,16 @@ pub enum BufferError {
     Locked,
 }
 
+pub trait BufferSource: AsRef<[u8]> + AsMut<[u8]> + Send {}
+
+impl <T> BufferSource for T where T: AsRef<[u8]> + AsMut<[u8]> + Send {}
+
 /// An async Buffer implementation that can be concurrently read from and written to
-pub struct AsyncBuffer <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct AsyncBuffer <const C: usize, T: BufferSource> {
     pub(crate) inner: MutexImpl<BufferInner<C, T>>
 }
 
-impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>>  AsyncBuffer<C, T> {
+impl <const C: usize, T: BufferSource> AsyncBuffer<C, T> {
 
     /// Creates a new [`AsyncBuffer`] from a provided source.
     /// the souce must have a non zero length.
@@ -57,28 +61,42 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>>  AsyncBuffer<C, T> {
             inner: MutexImpl::new(BufferInner::new(source))
         }
     }
-
-    /// Creates a [`BufferReader`] to read from the async buffer.
-    /// It is not crecommended to have more than one reader.
-    pub fn create_reader<'a>(&'a self) -> BufferReader<'a, C, T> {
-        BufferReader::new(self)
-    }
-
-    /// Creates a [`BufferWriter`] to write to the async buffer.
-    /// It is not crecommended to have more than one writer.
-    pub fn create_writer<'a>(&'a self) -> BufferWriter<'a, C, T> {
-        BufferWriter::new(self)
-    }
-
-    pub fn lock<'a>(&'a self) -> impl Future<Output = ReadWriteLock<'a, C, T>> {
-        ReadWriteLockFuture::new(self)
-    }
 }
 
-impl <const C: usize, const N: usize>  AsyncBuffer<C, [u8; N]> {
+impl <const C: usize, const N: usize> AsyncBuffer<C, [u8; N]> {
 
     pub fn new_stack() -> Self {
         Self::new([0; N])
     }
     
+}
+
+impl <const C: usize, T: BufferSource>  Buffer for AsyncBuffer<C, T> {
+    /// Creates a [`BufferReader`] to read from the async buffer.
+    /// It is not crecommended to have more than one reader.
+    fn create_reader<'a>(&'a self) -> impl BufferRead + 'a {
+        BufferReader::new(self)
+    }
+
+    /// Creates a [`BufferWriter`] to write to the async buffer.
+    /// It is not crecommended to have more than one writer.
+    fn create_writer<'a>(&'a self) -> impl writer::BufferWrite + 'a {
+        BufferWriter::new(self)
+    }
+
+    fn lock<'a>(&'a self) -> impl Future<Output = impl inner::RWLock + 'a> {
+        ReadWriteLockFuture::new(self)
+    }
+}
+
+pub trait Buffer {
+    /// Creates a [`BufferRead`] to read from the async buffer.
+    /// It is not crecommended to have more than one reader.
+    fn create_reader<'a>(&'a self) -> impl BufferRead + 'a;
+
+    /// Creates a [`BufferWrite`] to write to the async buffer.
+    /// It is not crecommended to have more than one writer.
+    fn create_writer<'a>(&'a self) -> impl BufferWrite + 'a;
+
+    fn lock<'a>(&'a self) -> impl Future<Output = impl RWLock + 'a>;
 }

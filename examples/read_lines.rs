@@ -2,7 +2,7 @@ use std::str::from_utf8;
 
 use embedded_io_async::Write;
 
-use embytes_buffer_async::{AsyncBuffer, BufferRead, ReadSliceAsyncResult};
+use embytes_buffer_async::{AsyncBuffer, Buffer, BufferRead, ReadSliceAsyncResult};
 
 const DATA: &str = r#"
     Dear user of this crate,

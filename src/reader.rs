@@ -1,29 +1,41 @@
 use core::{cell::Cell, ops::Deref, pin::Pin, slice::from_raw_parts, task::{Context, Poll}};
 
-use crate::{mutex::Mutex, AsyncBuffer, BufferError};
+use crate::{mutex::Mutex, AsyncBuffer, BufferError, BufferSource};
 
-pub trait BufferRead {
+#[cfg(feature = "embedded")]
+pub trait MaybeRead: embedded_io_async::Read {}
+
+#[cfg(feature = "embedded")]
+impl <T> MaybeRead for T where T: embedded_io_async::Read {}
+
+#[cfg(not(feature = "embedded"))]
+pub trait MaybeRead {}
+
+#[cfg(not(feature = "embedded"))]
+impl <T> MaybeRead for T {}
+
+pub trait BufferRead: MaybeRead + Send {
     
     /// Ready from the currently available data in the [`BufferReader`].
     /// The readable part of the buffer is passed to `f`. 
     /// `f` returns the number of bytes read and a result that is passed back to the caller.
     fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U);
 
-    fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U>;
+    fn read_slice_async<F, U: Send>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> + Send where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> + Send;
 
-    fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>>;
+    fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> + Send;
 
     fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> + Send;
 
     fn try_reset(&self) -> Result<(), BufferError>;
 
-    fn lock(&self) -> impl Future<Output = impl RLock>;
+    fn lock(&self) -> impl Future<Output = impl RLock> + Send;
 
     fn len(&self) -> usize;
 }
 
 /// A type to read from an [`AsyncBuffer`]
-pub struct BufferReader<'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct BufferReader<'a, const C: usize, T: BufferSource> {
     buffer: &'a AsyncBuffer<C, T>
 }
 
@@ -32,7 +44,7 @@ pub enum ReadSliceAsyncResult<T> {
     Ready(usize, T),
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> BufferReader<'a, C, T> {
 
     pub(super) fn new(buffer: &'a AsyncBuffer<C, T>) -> Self {
         Self {
@@ -125,7 +137,7 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferReader<'a, C, T> {
     }
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> BufferRead for BufferReader<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> BufferRead for BufferReader<'a, C, T> {
 
     fn read_slice<F, U>(&self, f: F) -> Result<U, BufferError> where F: FnOnce(&[u8]) -> (usize, U){
         self.buffer.inner.lock_mut(|inner|{
@@ -139,15 +151,15 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> BufferRead for Bu
         })
     }
     
-    fn read_slice_async<F, U>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> 
-    where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
+    fn read_slice_async<F, U: Send>(&self, f: F) -> impl Future<Output = Result<U, BufferError>> + Send
+    where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> + Send{
         ReadSliceAsyncFuture{
             reader: self,
             f
         }
     }
     
-    fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> {
+    fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> + Send {
         PullDataFuture{
             reader: self,
             buf: buf
@@ -178,14 +190,16 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> BufferRead for Bu
     }
 }
 
-pub struct ReadSliceAsyncFuture<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
+pub struct ReadSliceAsyncFuture<'a, 'b, const C: usize, T: BufferSource, F, U: Send> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> + Send {
     reader: &'b BufferReader<'a, C, T>,
     f: F
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> Unpin for ReadSliceAsyncFuture<'a, 'b, C, T, F, U> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {}
+impl <'a, 'b, const C: usize, T: BufferSource, F, U: Send> Unpin for ReadSliceAsyncFuture<'a, 'b, C, T, F, U> 
+    where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> + Send {}
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> Future for ReadSliceAsyncFuture<'a, 'b, C, T, F, U> where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> {
+impl <'a, 'b, const C: usize, T: BufferSource, F, U: Send> Future for ReadSliceAsyncFuture<'a, 'b, C, T, F, U> 
+    where F: FnMut(&[u8]) -> ReadSliceAsyncResult<U> + Send {
     type Output = Result<U, BufferError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -193,14 +207,16 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>, F, U> Future for Rea
     }
 }
 
-pub struct NewDataFuture <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct NewDataFuture <'a, 'b, const C: usize, T: BufferSource> {
     reader: &'b BufferReader<'a, C, T>,
     old_len: usize
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for NewDataFuture<'a, 'b, C, T> {}
+impl <'a, 'b, const C: usize, T: BufferSource> Unpin for NewDataFuture<'a, 'b, C, T> {}
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for NewDataFuture<'a, 'b, C, T> {
+// unsafe impl <'a, 'b, const C: usize, T: BufferSource> Send for NewDataFuture<'a, 'b, C, T> {}
+
+impl <'a, 'b, const C: usize, T: BufferSource> Future for NewDataFuture<'a, 'b, C, T> {
     type Output = Result<(), BufferError>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -217,14 +233,17 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for NewDataFu
     }
 }
 
-pub struct PullDataFuture <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct PullDataFuture <'a, 'b, 'c, const C: usize, T: BufferSource> {
     reader: &'b BufferReader<'a, C, T>,
     buf: &'c mut [u8]
 }
 
-impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for PullDataFuture<'a, 'b, 'c, C, T> {}
+impl <'a, 'b, 'c, const C: usize, T: BufferSource> Unpin for PullDataFuture<'a, 'b, 'c, C, T> {}
 
-impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for PullDataFuture<'a, 'b, 'c, C, T> {
+
+// unsafe impl <'a, 'b, 'c, const C: usize, T: BufferSource> Send for PullDataFuture<'a, 'b, 'c, C, T> {}
+
+impl <'a, 'b, 'c, const C: usize, T: BufferSource> Future for PullDataFuture<'a, 'b, 'c, C, T> {
     type Output = Result<(), BufferError>;
 
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -233,21 +252,21 @@ impl <'a, 'b, 'c, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for PullD
 }
 
 #[cfg(feature = "embedded")]
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> embedded_io::ErrorType for BufferReader<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> embedded_io::ErrorType for BufferReader<'a, C, T> {
     type Error = embedded_io::ErrorKind;
 }
 
 #[cfg(feature = "embedded")]
-pub struct EmbeddedReadFuture <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct EmbeddedReadFuture <'a, 'b, const C: usize, T: BufferSource> {
     reader: &'a BufferReader<'a, C, T>,
     buf: &'b mut [u8]
 }
 
 #[cfg(feature = "embedded")]
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for EmbeddedReadFuture<'a, 'b, C, T> {}
+impl <'a, 'b, const C: usize, T: BufferSource> Unpin for EmbeddedReadFuture<'a, 'b, C, T> {}
 
 #[cfg(feature = "embedded")]
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for EmbeddedReadFuture<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Future for EmbeddedReadFuture<'a, 'b, C, T> {
     type Output = Result<usize, embedded_io::ErrorKind>;
 
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -261,7 +280,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for EmbeddedR
 }
 
 #[cfg(feature = "embedded")]
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> embedded_io_async::Read for BufferReader<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> embedded_io_async::Read for BufferReader<'a, C, T> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         let f = EmbeddedReadFuture{
             reader: self,
@@ -276,14 +295,14 @@ pub trait RLock: Deref<Target = [u8]> + Send {
     fn wait_for_new_data(self) -> impl Future<Output = Result<(), BufferError>> + Send;
 }
 
-pub struct ReadLock<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct ReadLock<'a, 'b, const C: usize, T: BufferSource> {
     reader: &'b BufferReader<'a, C, T>,
     data: *const u8,
     len: usize,
     bytes_read: Cell<usize>
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> ReadLock<'a, 'b, C, T> {
     fn new(reader: &'b BufferReader<'a, C, T>, data: *const u8, len: usize,) -> Self {
         Self {
             data: data,
@@ -294,7 +313,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadLock<'a, 'b, C, 
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> RLock for ReadLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> RLock for ReadLock<'a, 'b, C, T> {
     fn set_bytes_read(&self, bytes_read: usize) -> Result<(), BufferError> {
         if bytes_read > self.len {
             Err(BufferError::NoData)
@@ -304,7 +323,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> RLock for Rea
         }
     }
 
-    fn wait_for_new_data(self) -> impl Future<Output = Result<(), BufferError>> + Send {
+    fn wait_for_new_data(self) -> impl Future<Output = Result<(), BufferError>> {
         let old_len = self.reader.buffer.inner.lock_mut(|inner| {
             inner.read_commit(self.bytes_read.get()).unwrap();
             self.bytes_read.set(0);
@@ -318,7 +337,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]> + Send> RLock for Rea
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for ReadLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Deref for ReadLock<'a, 'b, C, T> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -328,7 +347,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for ReadLock<'
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for ReadLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Drop for ReadLock<'a, 'b, C, T> {
     fn drop(&mut self) {
         self.reader.buffer.inner.lock_mut(|inner| {
             inner.read_commit(self.bytes_read.get()).unwrap();
@@ -337,15 +356,16 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for ReadLock<'a
     }
 }
 
-unsafe impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Send for ReadLock<'a, 'b, C, T> {}
+/// Is safe because 
+unsafe impl <'a, 'b, const C: usize, T: BufferSource> Send for ReadLock<'a, 'b, C, T> {}
 
-pub struct ReadLockFuture <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct ReadLockFuture <'a, 'b, const C: usize, T: BufferSource> {
     reader: &'b BufferReader<'a, C, T>
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for ReadLockFuture<'a, 'b, C, T> {}
+impl <'a, 'b, const C: usize, T: BufferSource> Unpin for ReadLockFuture<'a, 'b, C, T> {}
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for ReadLockFuture<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Future for ReadLockFuture<'a, 'b, C, T> {
     type Output = ReadLock<'a, 'b, C, T>;
 
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

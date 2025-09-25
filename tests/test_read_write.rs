@@ -1,6 +1,6 @@
 use std::{pin::Pin, str::from_utf8, sync::Arc, time::Duration};
 
-use embytes_buffer_async::{testutils::{assert_pending, assert_ready}, AsyncBuffer, BufferRead, BufferWrite, RLock, ReadSliceAsyncResult, WLock, WriteSliceAsyncResult};
+use embytes_buffer_async::{testutils::{assert_pending, assert_ready}, AsyncBuffer, Buffer, BufferRead, BufferWrite, RLock, ReadSliceAsyncResult, WLock, WriteSliceAsyncResult};
 
 use ntest::timeout;
 
@@ -114,14 +114,14 @@ async fn test_embedded_read_write_with_waiting() {
     let buffer_1 = Arc::new(AsyncBuffer::<1, _>::new([0; 64]));
     let buffer_2 = buffer_1.clone();
 
-    let write_join = tokio::spawn(async move {
+    let write_join = async move {
         let mut writer = buffer_1.create_writer();
         for byte in 0..254 {
             writer.write(&[byte]).await.unwrap();
         }
-    });
+    };
 
-    let read_join = tokio::spawn(async move {
+    let read_join = async move {
         let mut reader = buffer_2.create_reader();
 
         let mut expected_byte = 0;
@@ -135,11 +135,10 @@ async fn test_embedded_read_write_with_waiting() {
                 expected_byte += 1;
             }
         }
-    });
+    };
 
-    tokio::try_join!(read_join, write_join).unwrap();
+    tokio::join!(read_join, write_join);
 }
-
 
 #[tokio::test]
 #[timeout(10000)]
@@ -149,7 +148,7 @@ async fn test_lock_read_write_with_waiting() {
     let buffer_1 = Arc::new(AsyncBuffer::<1, _>::new([0; 16]));
     let buffer_2 = buffer_1.clone();
 
-    let write_join = tokio::spawn(async move {
+    let write_join = async move {
         let mut writer = buffer_1.create_writer();
         for i in 0..16 {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -162,7 +161,8 @@ async fn test_lock_read_write_with_waiting() {
                 println!("write: iteration = {}, byte = {}", i, *byte as char);
             }
         }
-    });
+        Ok(())
+    };
 
     let read_join = tokio::spawn(async move {
         let reader = buffer_2.create_reader();
@@ -458,6 +458,4 @@ fn test_read_write_lock_prevent_simple_lock(){
 
     assert_ready(read_write_lock_future.as_mut());
 }
-
-
 

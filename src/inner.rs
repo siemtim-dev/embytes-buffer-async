@@ -1,11 +1,11 @@
 use core::{mem, ops::{Deref, DerefMut}, slice::from_raw_parts_mut, task::{Context, Poll, Waker}};
 
-use crate::{mutex::Mutex, AsyncBuffer, BufferError, WLock};
+use crate::{mutex::Mutex, AsyncBuffer, BufferError, BufferSource, WLock};
 
 use heapless::Vec;
 
 /// This struct contains the inner state of the buffer
-pub(crate) struct BufferInner <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub(crate) struct BufferInner <const C: usize, T: BufferSource> {
     
     /// The index where to start read operations
     read_position: usize,
@@ -28,7 +28,7 @@ pub(crate) struct BufferInner <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
     
 }
 
-impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
+impl <const C: usize, T: BufferSource> BufferInner<C, T> {
     pub(super) fn new(source: T) -> Self {
         Self {
             read_position: 0,
@@ -297,13 +297,13 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> BufferInner<C, T> {
 }
 
 
-pub struct ReadWriteLockFuture<'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct ReadWriteLockFuture<'a, const C: usize, T: BufferSource> {
     buffer: &'a AsyncBuffer<C, T>,
     has_read_lock: bool,
     has_write_lock: bool
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadWriteLockFuture<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> ReadWriteLockFuture<'a, C, T> {
     pub(super) fn new(buffer: &'a AsyncBuffer<C, T>) -> Self {
         Self {
             buffer: buffer,
@@ -313,9 +313,9 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadWriteLockFuture<'a, 
     }
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Unpin for ReadWriteLockFuture<'a, C, T> {}
+impl <'a, const C: usize, T: BufferSource> Unpin for ReadWriteLockFuture<'a, C, T> {}
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for ReadWriteLockFuture<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> Future for ReadWriteLockFuture<'a, C, T> {
     type Output = ReadWriteLock<'a, C, T>;
 
     fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -350,12 +350,17 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Future for ReadWriteLock
     }
 }
 
-pub struct ReadWriteLock <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub trait RWLock {
+    fn reset(&self);
+    fn writeable_data<'b>(&'b self) -> impl WLock + 'b;
+}
+
+pub struct ReadWriteLock <'a, const C: usize, T: BufferSource> {
     buffer: &'a AsyncBuffer<C, T>
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadWriteLock<'a, C, T> {
-    pub fn writeable_data<'b>(&'b self) -> impl WLock {
+impl <'a, const C: usize, T: BufferSource> RWLock for ReadWriteLock<'a, C, T> {
+    fn writeable_data<'b>(&'b self) -> impl WLock + 'b {
         let (data, len) = self.buffer.inner.lock_mut(|inner| unsafe {
             let writeable = inner.writeable_data_unchecked();
             (writeable.as_mut_ptr(), writeable.len())
@@ -364,14 +369,14 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> ReadWriteLock<'a, C, T> 
         RWWriteLock::new(self, data, len)
     }
 
-    pub fn reset(&self) {
+    fn reset(&self) {
         self.buffer.inner.lock_mut(|inner| {
             unsafe { inner.reset_unchecked() };
         });
     }
 }
 
-impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for ReadWriteLock<'a, C, T> {
+impl <'a, const C: usize, T: BufferSource> Drop for ReadWriteLock<'a, C, T> {
     fn drop(&mut self) {
         self.buffer.inner.lock_mut(|inner| {
             unsafe { inner.read_write_unlock() };
@@ -379,13 +384,13 @@ impl <'a, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Drop for ReadWriteLock<'
     }
 }
 
-pub struct RWWriteLock<'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> {
+pub struct RWWriteLock<'a, 'b, const C: usize, T: BufferSource> {
     writer: &'b ReadWriteLock<'a, C, T>,
     data: *mut u8,
     len: usize,
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> RWWriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> RWWriteLock<'a, 'b, C, T> {
     fn new(writer: &'b ReadWriteLock<'a, C, T>, data: *mut u8, len: usize,) -> Self {
         Self {
             data: data,
@@ -395,7 +400,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> RWWriteLock<'a, 'b, 
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> WLock for RWWriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> WLock for RWWriteLock<'a, 'b, C, T> {
     fn commit(self, bytes_written: usize) -> Result<(), BufferError> {
         self.writer.buffer.inner.lock_mut(|inner| {
             inner.write_commit(bytes_written)
@@ -403,7 +408,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> WLock for RWWriteLoc
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for RWWriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> Deref for RWWriteLock<'a, 'b, C, T> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -413,7 +418,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Deref for RWWriteLoc
     }
 }
 
-impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> DerefMut for RWWriteLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> DerefMut for RWWriteLock<'a, 'b, C, T> {
 
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
@@ -422,7 +427,7 @@ impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> DerefMut for RWWrite
     }
 }
 
-unsafe impl <'a, 'b, const C: usize, T: AsRef<[u8]> + AsMut<[u8]>> Send for RWWriteLock<'a, 'b, C, T> {}
+unsafe impl <'a, 'b, const C: usize, T: BufferSource> Send for RWWriteLock<'a, 'b, C, T> {}
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
