@@ -13,7 +13,7 @@ async fn test_read_write() {
 
 
     let mut source = [0; 64];
-    let buffer = AsyncBuffer::<2, _>::new(&mut source);
+    let buffer = AsyncBuffer::<1, _>::new(&mut source);
     
     let sender_future = async {
         let mut writer = buffer.create_writer();
@@ -43,7 +43,7 @@ async fn test_read_write() {
 #[timeout(10000)]
 fn test_read_slice() {
     let mut source = [0; 1024];
-    let buffer = AsyncBuffer::<2, _>::new(&mut source);
+    let buffer = AsyncBuffer::<1, _>::new(&mut source);
 
     let writer = buffer.create_writer();
 
@@ -71,7 +71,7 @@ async fn test_write_read_slice() {
     const DATA: &[u8] = "123456789-123456789-123456789-123456789-;".as_bytes();
 
     let mut source = [0; 1024];
-    let buffer = AsyncBuffer::<2, _>::new(&mut source);
+    let buffer = AsyncBuffer::<1, _>::new(&mut source);
     
     let sender_future = async {
         

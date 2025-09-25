@@ -24,6 +24,8 @@ pub mod pipe;
 /// Just for tests
 pub mod testutils;
 
+pub(crate) mod wakers;
+
 /// Error enum 
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

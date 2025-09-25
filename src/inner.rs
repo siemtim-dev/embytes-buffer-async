@@ -1,8 +1,7 @@
-use core::{mem, ops::{Deref, DerefMut}, slice::from_raw_parts_mut, task::{Context, Poll, Waker}};
+use core::{ops::{Deref, DerefMut}, slice::from_raw_parts_mut, task::{Context, Poll}};
 
-use crate::{mutex::Mutex, AsyncBuffer, BufferError, BufferSource, WLock};
+use crate::{mutex::Mutex, wakers::WakerRegistration, AsyncBuffer, BufferError, BufferSource, WLock};
 
-use heapless::Vec;
 
 /// This struct contains the inner state of the buffer
 pub(crate) struct BufferInner <const C: usize, T: BufferSource> {
@@ -17,10 +16,10 @@ pub(crate) struct BufferInner <const C: usize, T: BufferSource> {
     source: T,
 
     /// wakers registered from waiting readers that wait for new data
-    read_wakers: Vec<Waker, C>,
+    read_wakers: WakerRegistration<C>,
 
     /// wakers registered from waiting writers that wait for new space to write to
-    write_wakers: Vec<Waker, C>,
+    write_wakers: WakerRegistration<C>,
 
     read_loked: bool,
 
@@ -35,8 +34,8 @@ impl <const C: usize, T: BufferSource> BufferInner<C, T> {
             write_position: 0,
             source: source,
             
-            read_wakers: Vec::new(),
-            write_wakers: Vec::new(),
+            read_wakers: WakerRegistration::new(),
+            write_wakers: WakerRegistration::new(),
 
             read_loked: false,
             write_locked: false
@@ -150,25 +149,19 @@ impl <const C: usize, T: BufferSource> BufferInner<C, T> {
     }
 
     pub(crate) fn add_write_waker(&mut self, cx: &mut Context<'_>) {
-        self.write_wakers.push(cx.waker().clone())
-            .expect("expected enaugh space for write waker")
+        self.write_wakers.register(cx.waker());
     }
 
     pub(crate) fn wake_writers(&mut self) {
-        mem::replace(&mut self.write_wakers, Vec::new())
-            .into_iter()
-            .for_each(|waker| waker.wake());
+        self.write_wakers.wake();
     }
 
     pub(crate) fn add_read_waker(&mut self, cx: &mut Context<'_>) {
-        self.read_wakers.push(cx.waker().clone())
-            .expect("expected enaugh space for read waker")
+        self.read_wakers.register(cx.waker());
     }
 
     pub(crate) fn wake_readers(&mut self) {
-        mem::replace(&mut self.read_wakers, Vec::new())
-            .into_iter()
-            .for_each(|waker| waker.wake());
+        self.read_wakers.wake();
     }
 
     /// Returns the readable data as a slice
