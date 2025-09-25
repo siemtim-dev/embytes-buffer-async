@@ -15,9 +15,14 @@ mod writer;
 pub use writer::*;
 
 mod inner;
+pub use inner::*;
 
 #[cfg(feature = "embedded")]
 pub mod pipe;
+
+// #[cfg(test)]
+/// Just for tests
+pub mod testutils;
 
 /// Error enum 
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +68,10 @@ impl <const C: usize, T: AsRef<[u8]> + AsMut<[u8]>>  AsyncBuffer<C, T> {
     /// It is not crecommended to have more than one writer.
     pub fn create_writer<'a>(&'a self) -> BufferWriter<'a, C, T> {
         BufferWriter::new(self)
+    }
+
+    pub fn lock<'a>(&'a self) -> impl Future<Output = ReadWriteLock<'a, C, T>> {
+        ReadWriteLockFuture::new(self)
     }
 }
 

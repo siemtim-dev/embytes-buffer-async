@@ -1,6 +1,6 @@
-use std::{str::from_utf8, sync::Arc, time::Duration};
+use std::{pin::Pin, str::from_utf8, sync::Arc, time::Duration};
 
-use embytes_buffer_async::{AsyncBuffer, BufferRead, BufferWrite, RLock, ReadSliceAsyncResult, WLock, WriteSliceAsyncResult};
+use embytes_buffer_async::{testutils::{assert_pending, assert_ready}, AsyncBuffer, BufferRead, BufferWrite, RLock, ReadSliceAsyncResult, WLock, WriteSliceAsyncResult};
 
 use ntest::timeout;
 
@@ -362,3 +362,102 @@ async fn test_read_lock_write_lock() {
     tokio::try_join!(read_join, write_join).unwrap();
 
 }
+
+
+#[test]
+fn test_read_write_lock() {
+
+    let buffer = AsyncBuffer::<3, [_; 4]>::new_stack();
+
+    let _reader = buffer.create_reader();
+    let _writer = buffer.create_writer();
+
+
+    let mut read_write_lock_future = buffer.lock();
+    let read_write_lock_future = unsafe { Pin::new_unchecked(&mut read_write_lock_future) };
+
+    assert_ready(read_write_lock_future);
+}
+
+#[test]
+fn test_read_write_lock_negative() {
+
+    let buffer = AsyncBuffer::<3, [_; 4]>::new_stack();
+
+    let reader = buffer.create_reader();
+    let _writer = buffer.create_writer();
+
+    let mut read_lock_future = reader.lock();
+    let read_lock_future = unsafe { Pin::new_unchecked(&mut read_lock_future) };
+    let read_lock = assert_ready(read_lock_future);
+
+
+    let mut read_write_lock_future = buffer.lock();
+    let mut read_write_lock_future = unsafe { Pin::new_unchecked(&mut read_write_lock_future) };
+
+    assert_pending(read_write_lock_future.as_mut());
+
+    drop(read_lock);
+
+    assert_ready(read_write_lock_future.as_mut());
+}
+
+#[test]
+fn test_read_write_lock_double_negative() {
+
+    let buffer = AsyncBuffer::<3, [_; 4]>::new_stack();
+
+    let reader = buffer.create_reader();
+    let writer = buffer.create_writer();
+
+    let mut read_lock_future = reader.lock();
+    let read_lock_future = unsafe { Pin::new_unchecked(&mut read_lock_future) };
+    let read_lock = assert_ready(read_lock_future);
+
+    let mut write_lock_future = writer.lock();
+    let write_lock_future = unsafe { Pin::new_unchecked(&mut write_lock_future) };
+    let write_lock = assert_ready(write_lock_future);
+
+
+    let mut read_write_lock_future = buffer.lock();
+    let mut read_write_lock_future = unsafe { Pin::new_unchecked(&mut read_write_lock_future) };
+
+    assert_pending(read_write_lock_future.as_mut());
+
+    drop(read_lock);
+
+    assert_pending(read_write_lock_future.as_mut());
+
+    drop(write_lock);
+
+    assert_ready(read_write_lock_future.as_mut());
+}
+
+
+#[test]
+fn test_read_write_lock_prevent_simple_lock(){
+
+    let buffer = AsyncBuffer::<3, [_; 4]>::new_stack();
+
+    let reader = buffer.create_reader();
+    let writer = buffer.create_writer();
+
+    let mut read_lock_future = reader.lock();
+    let read_lock_future = unsafe { Pin::new_unchecked(&mut read_lock_future) };
+    let read_lock = assert_ready(read_lock_future);
+
+    let mut read_write_lock_future = buffer.lock();
+    let mut read_write_lock_future = unsafe { Pin::new_unchecked(&mut read_write_lock_future) };
+    assert_pending(read_write_lock_future.as_mut());
+
+    let mut write_lock_future = writer.lock();
+    let write_lock_future = unsafe { Pin::new_unchecked(&mut write_lock_future) };
+    assert_pending(write_lock_future);
+
+    drop(read_lock);
+
+    assert_ready(read_write_lock_future.as_mut());
+}
+
+
+
