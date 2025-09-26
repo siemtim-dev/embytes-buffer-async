@@ -1,6 +1,6 @@
 use core::{ops::{Deref, DerefMut}, slice::from_raw_parts_mut, task::{Context, Poll}};
 
-use crate::{mutex::Mutex, wakers::WakerRegistration, AsyncBuffer, BufferError, BufferSource, WLock};
+use crate::{mutex::Mutex, wakers::WakerRegistration, AsyncBuffer, BufferError, BufferRead, BufferReader, BufferSource, BufferWrite, BufferWriter, WLock};
 
 
 /// This struct contains the inner state of the buffer
@@ -346,6 +346,9 @@ impl <'a, const C: usize, T: BufferSource> Future for ReadWriteLockFuture<'a, C,
 pub trait RWLock {
     fn reset(&self);
     fn writeable_data<'b>(&'b self) -> impl WLock + 'b;
+
+    fn release_into_reader(self) -> impl BufferRead;
+    fn release_into_writer(self) -> impl BufferWrite;
 }
 
 pub struct ReadWriteLock <'a, const C: usize, T: BufferSource> {
@@ -366,6 +369,14 @@ impl <'a, const C: usize, T: BufferSource> RWLock for ReadWriteLock<'a, C, T> {
         self.buffer.inner.lock_mut(|inner| {
             unsafe { inner.reset_unchecked() };
         });
+    }
+
+    fn release_into_reader(self) -> impl BufferRead {
+        BufferReader::new(self.buffer)
+    }
+
+    fn release_into_writer(self) -> impl BufferWrite {
+        BufferWriter::new(self.buffer)
     }
 }
 
@@ -424,7 +435,9 @@ unsafe impl <'a, 'b, const C: usize, T: BufferSource> Send for RWWriteLock<'a, '
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
-    use crate::BufferInner;
+    use core::pin::Pin;
+
+    use crate::{mutex::Mutex, testutils::assert_ready, AsyncBuffer, Buffer, BufferInner, RWLock};
 
     #[test]
     fn test_inner_shift() {
@@ -442,5 +455,28 @@ mod tests {
         assert_eq!(inner.write_position, 3);
         assert_eq!(inner.read_position, 0);
         assert_eq!(&source[..3], &[3, 4, 5]);
+    }
+
+    #[test]
+    fn test_release_into_releases_lock() {
+        let buffer = AsyncBuffer::<1, [_; 16]>::new_stack();
+
+        let mut rwlock_future = buffer.lock();
+        let rwlock_future = unsafe { Pin::new_unchecked(&mut rwlock_future) };
+        let rwlock = assert_ready(rwlock_future);
+
+        buffer.inner.lock(|inner| {
+            assert!(inner.read_loked);
+            assert!(inner.write_locked);
+        });
+
+        let reader = rwlock.release_into_reader();
+
+        buffer.inner.lock(|inner| {
+            assert!(! inner.read_loked);
+            assert!(! inner.write_locked);
+        });
+
+        let _ = reader;
     }
 }
