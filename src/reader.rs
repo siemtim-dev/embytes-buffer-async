@@ -1,4 +1,4 @@
-use core::{cell::Cell, ops::Deref, pin::Pin, slice::from_raw_parts, task::{Context, Poll}};
+use core::{cell::Cell, ops::Deref, pin::Pin, slice::{self, from_raw_parts}, task::{Context, Poll}};
 
 use crate::{mutex::Mutex, AsyncBuffer, BufferError, BufferSource};
 
@@ -25,11 +25,11 @@ pub trait BufferRead: MaybeRead + Send {
 
     fn pull(&self, buf: &mut[u8]) -> impl Future<Output = Result<(), BufferError>> + Send;
 
-    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> + Send;
+    fn wait_for_new_data(&self) -> impl Future<Output = Result<(), BufferError>> + Send;
 
     fn try_reset(&self) -> Result<(), BufferError>;
 
-    fn lock(&self) -> impl Future<Output = impl RLock> + Send;
+    fn lock(&self) -> impl Future<Output = impl RLock<'_> + '_> + Send;
 
     fn len(&self) -> usize;
 }
@@ -170,7 +170,7 @@ impl <'a, const C: usize, T: BufferSource> BufferRead for BufferReader<'a, C, T>
         self.buffer.inner.lock_mut(|inner| inner.try_reset())
     }
 
-    fn wait_for_new_data<'b>(&'b self) -> impl Future<Output = Result<(), BufferError>> + Send {
+    fn wait_for_new_data(&self) -> impl Future<Output = Result<(), BufferError>> + Send {
         self.buffer.inner.lock(|inner|{
             NewDataFuture{
                 reader: self,
@@ -179,7 +179,7 @@ impl <'a, const C: usize, T: BufferSource> BufferRead for BufferReader<'a, C, T>
         })
     }
     
-    fn lock(&self) -> impl Future<Output = impl RLock> {
+    fn lock(&self) -> impl Future<Output = impl RLock<'_> + '_> + Send {
         ReadLockFuture {
             reader: self
         }
@@ -290,16 +290,20 @@ impl <'a, const C: usize, T: BufferSource> embedded_io_async::Read for BufferRea
     }
 }
 
-pub trait RLock: Deref<Target = [u8]> + Send {
+pub trait RLock<'c>: Deref<Target = [u8]> + Send {
     fn set_bytes_read(&self, bytes_read: usize) -> Result<(), BufferError>;
     fn wait_for_new_data(self) -> impl Future<Output = Result<(), BufferError>> + Send;
+
+    fn parse<F, PARSED: 'c>(self, f: F) -> Option<impl Deref<Target = PARSED> + 'c>
+    where F: Fn(&'c [u8]) -> Option<(usize, PARSED)>;
 }
 
 pub struct ReadLock<'a, 'b, const C: usize, T: BufferSource> {
     reader: &'b BufferReader<'a, C, T>,
     data: *const u8,
     len: usize,
-    bytes_read: Cell<usize>
+    bytes_read: Cell<usize>,
+    do_not_unlock: Cell<bool>
 }
 
 impl <'a, 'b, const C: usize, T: BufferSource> ReadLock<'a, 'b, C, T> {
@@ -308,12 +312,13 @@ impl <'a, 'b, const C: usize, T: BufferSource> ReadLock<'a, 'b, C, T> {
             data: data,
             reader: reader,
             len: len,
-            bytes_read: Cell::new(0)
+            bytes_read: Cell::new(0),
+            do_not_unlock: Cell::new(false)
         }
     }
 }
 
-impl <'a, 'b, const C: usize, T: BufferSource> RLock for ReadLock<'a, 'b, C, T> {
+impl <'a, 'b, const C: usize, T: BufferSource> RLock<'b> for ReadLock<'a, 'b, C, T> {
     fn set_bytes_read(&self, bytes_read: usize) -> Result<(), BufferError> {
         if bytes_read > self.len {
             Err(BufferError::NoData)
@@ -335,6 +340,11 @@ impl <'a, 'b, const C: usize, T: BufferSource> RLock for ReadLock<'a, 'b, C, T> 
             old_len: old_len
         }
     }
+
+    fn parse<F, PARSED: 'b>(self, f: F) -> Option<impl Deref<Target = PARSED> + 'b>
+    where F: Fn(&'b [u8]) -> Option<(usize, PARSED)> {
+        ParsedDataLock::parse(self, f)
+    }
 }
 
 impl <'a, 'b, const C: usize, T: BufferSource> Deref for ReadLock<'a, 'b, C, T> {
@@ -350,8 +360,10 @@ impl <'a, 'b, const C: usize, T: BufferSource> Deref for ReadLock<'a, 'b, C, T> 
 impl <'a, 'b, const C: usize, T: BufferSource> Drop for ReadLock<'a, 'b, C, T> {
     fn drop(&mut self) {
         self.reader.buffer.inner.lock_mut(|inner| {
-            inner.read_commit(self.bytes_read.get()).unwrap();
-            unsafe { inner.read_unlock() };
+            if ! self.do_not_unlock.get() {
+                inner.read_commit(self.bytes_read.get()).unwrap();
+                unsafe { inner.read_unlock() };
+            }
         });
     }
 }
@@ -373,4 +385,81 @@ impl <'a, 'b, const C: usize, T: BufferSource> Future for ReadLockFuture<'a, 'b,
             inner.poll_read_lock(cx).map(|(data, len)| ReadLock::new(self.reader, data, len))
         })
     }
+}
+
+pub struct ParsedDataLock<'a, 'b, const C: usize, T: BufferSource, PARSED: 'b> {
+    reader: &'b BufferReader<'a, C, T>,
+    bytes_read: usize,
+    parsed: PARSED,
+}
+
+impl<'a, 'b, const C: usize, T: BufferSource, PARSED: 'b> ParsedDataLock<'a, 'b, C, T, PARSED> {
+
+    fn parse<F>(lock: ReadLock<'a, 'b, C, T>, f: F) -> Option<Self> 
+    where F: Fn(&'b [u8]) -> Option<(usize, PARSED)> {
+
+        assert_eq!(lock.bytes_read.get(), 0, "must not have bytes read when using parse function");
+        
+        let data: &'b _ = unsafe {
+            slice::from_raw_parts(lock.data, lock.len)
+        };
+        match f(data) {
+            Some((bytes_read, parsed)) => {
+                lock.do_not_unlock.set(true);
+                Some(Self {
+                    reader: lock.reader,
+                    bytes_read,
+                    parsed
+                })
+            },
+            None => None,
+        }   
+    }
+}
+
+impl<'a, 'b, const C: usize, T: BufferSource, PARSED: 'b> Drop for ParsedDataLock<'a, 'b, C, T, PARSED> {
+    fn drop(&mut self) {
+        self.reader.buffer.inner.lock_mut(|inner| {
+            inner.read_commit(self.bytes_read).unwrap();
+            unsafe { inner.read_unlock() };
+        });
+    }
+}
+
+impl<'a, 'b, const C: usize, T: BufferSource, PARSED: 'b> Deref for ParsedDataLock<'a, 'b, C, T, PARSED> {
+    type Target = PARSED;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parsed
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use crate::{AsyncBuffer, Buffer, BufferRead, BufferWrite, RLock};
+
+
+    #[tokio::test]
+    async fn parse_string() {
+        let buffer = AsyncBuffer::<2, [_; 64]>::new_stack();
+        buffer.create_writer().push(&[64, 64, 64, 64]).unwrap();
+
+        let reader = buffer.create_reader();
+        let lock = reader.lock().await;
+        let parsed = lock.parse(|data| {
+            let s = str::from_utf8(data).unwrap();
+            Some((data.len(), s))
+        }).unwrap();
+
+        assert_eq!(*parsed, "@@@@");
+
+        drop(parsed);
+
+
+
+
+        
+    }
+
 }

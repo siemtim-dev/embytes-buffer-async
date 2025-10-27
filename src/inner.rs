@@ -1,6 +1,6 @@
 use core::{ops::{Deref, DerefMut}, slice::from_raw_parts_mut, task::{Context, Poll}};
 
-use crate::{mutex::Mutex, wakers::WakerRegistration, AsyncBuffer, BufferError, BufferRead, BufferReader, BufferSource, BufferWrite, BufferWriter, WLock};
+use crate::{AsyncBuffer, BufferError, BufferRead, BufferReader, BufferSource, BufferWrite, BufferWriter, WLock, mutex::Mutex, wakers::WakerRegistration};
 
 
 /// This struct contains the inner state of the buffer
@@ -210,7 +210,7 @@ impl <const C: usize, T: BufferSource> BufferInner<C, T> {
             Ok(())
         }
     }
-
+ 
     pub(crate) fn poll_read_lock(&mut self, cx: &mut Context<'_>) -> Poll<(*const u8, usize)> {
         if self.read_loked {
             self.add_read_waker(cx);

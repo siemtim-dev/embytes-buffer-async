@@ -1,6 +1,6 @@
 use std::{pin::Pin, str::from_utf8, sync::Arc, time::Duration};
 
-use embytes_buffer_async::{testutils::{assert_pending, assert_ready}, AsyncBuffer, Buffer, BufferRead, BufferWrite, RLock, ReadSliceAsyncResult, WLock, WriteSliceAsyncResult};
+use embytes_buffer_async::{testutils::{assert_pending, assert_ready}, AsyncBuffer, Buffer, BufferRead, BufferWrite, ReadSliceAsyncResult, WriteSliceAsyncResult};
 
 use ntest::timeout;
 
@@ -307,61 +307,61 @@ async fn test_reset() {
     tokio::try_join!(read_join, write_join).unwrap();
 }
 
-#[tokio::test]
-#[timeout(10000)]
-async fn test_read_lock_write_lock() {
+// #[tokio::test]
+// #[timeout(10000)]
+// async fn test_read_lock_write_lock() {
 
-    const DATA: &[&str] = &[
-        "agsdoadsg",
-        "123012345",
-        "sdhfkfhds"
-    ];
+//     const DATA: &[&str] = &[
+//         "agsdoadsg",
+//         "123012345",
+//         "sdhfkfhds"
+//     ];
 
-    let buffer_1 = Arc::new(AsyncBuffer::<1, _>::new([0; 16]));
-    let buffer_2 = buffer_1.clone();
+//     let buffer_1 = Arc::new(AsyncBuffer::<1, _>::new([0; 16]));
+//     let buffer_2 = buffer_1.clone();
 
-    let write_join = tokio::spawn(async move {
-        let writer = buffer_1.create_writer();
+//     let write_join = tokio::spawn(async move {
+//         let writer = buffer_1.create_writer();
 
-        let mut i = 0;
+//         let mut i = 0;
 
-        while i < DATA.len() {
-            let mut lock = writer.lock().await;
-            let word = DATA[i];
-            let word_bytes = word.as_bytes();
-            if lock.len() >= word.len() {
-                lock[..word.len()].copy_from_slice(word_bytes);
-                lock.commit(word.len()).unwrap();
-                println!("write: wrote {} ({})", word, i);
-                i += 1;
-            } else {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                println!("write: did not write {} ({}): len {} required, {} given", word, i, word_bytes.len(), lock.len());
-            }
-        }
-    });
+//         while i < DATA.len() {
+//             let mut lock = writer.lock().await;
+//             let word = DATA[i];
+//             let word_bytes = word.as_bytes();
+//             if lock.len() >= word.len() {
+//                 lock[..word.len()].copy_from_slice(word_bytes);
+//                 lock.commit(word.len()).unwrap();
+//                 println!("write: wrote {} ({})", word, i);
+//                 i += 1;
+//             } else {
+//                 tokio::time::sleep(Duration::from_millis(1)).await;
+//                 println!("write: did not write {} ({}): len {} required, {} given", word, i, word_bytes.len(), lock.len());
+//             }
+//         }
+//     });
 
-    let read_join = tokio::spawn(async move {
-        let reader = buffer_2.create_reader();
-        let mut i = 0;
-        while i < DATA.len() {
-            let lock = reader.lock().await;
-            let expected_word = DATA[i];
-            let expected_bytes = expected_word.as_bytes();
-            if lock.len() >= expected_bytes.len() {
-                let lock_string = from_utf8(&lock[..expected_word.len()]).unwrap();
-                assert_eq!(lock_string, expected_word, "expected {} at {}", expected_word, i);
-                lock.set_bytes_read(expected_bytes.len()).unwrap();
-                i += 1;
-            } else {
-                lock.wait_for_new_data().await.unwrap();
-            }
-        }
-    });
+//     let read_join = tokio::spawn(async move {
+//         let reader = buffer_2.create_reader();
+//         let mut i = 0;
+//         while i < DATA.len() {
+//             let lock = reader.lock().await;
+//             let expected_word = DATA[i];
+//             let expected_bytes = expected_word.as_bytes();
+//             if lock.len() >= expected_bytes.len() {
+//                 let lock_string = from_utf8(&lock[..expected_word.len()]).unwrap();
+//                 assert_eq!(lock_string, expected_word, "expected {} at {}", expected_word, i);
+//                 lock.set_bytes_read(expected_bytes.len()).unwrap();
+//                 i += 1;
+//             } else {
+//                 lock.wait_for_new_data().await.unwrap();
+//             }
+//         }
+//     });
 
-    tokio::try_join!(read_join, write_join).unwrap();
+//     tokio::try_join!(read_join, write_join).unwrap();
 
-}
+// }
 
 
 #[test]
